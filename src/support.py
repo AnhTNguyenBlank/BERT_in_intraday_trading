@@ -2,17 +2,7 @@ import pandas as pd
 import numpy as np
 
 pd.set_option('display.max_columns', 999)
-from scipy.stats import levy_stable
-
 from datetime import datetime
-from scipy.stats import kstest
-from scipy.stats import jarque_bera
-# from arch.unitroot import ADF
-from scipy.stats import kurtosis
-from scipy.stats import skew
-# from arch import arch_model
-
-import pickle
 
 import ta
 
@@ -22,24 +12,11 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import webbrowser
 
-from hyperopt import tpe, hp, fmin, STATUS_OK,Trials
-from hyperopt.pyll.base import scope
-
-from scipy.signal import argrelmin
-from scipy.signal import argrelmax
 
 plt.style.use('classic')
 
-
 import MetaTrader5 as mt
 import pandas as pd
-import ml_collections
-import yaml
-
-from datetime import datetime
-import pytz
-import sys
-
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.chrome.options import Options
@@ -51,6 +28,7 @@ from datetime import datetime, timedelta, timezone
 from tqdm import tqdm
 import contextlib
 import os
+
 
 
 
@@ -734,19 +712,21 @@ def extract_article_content(url):
     if not li_tag:
         return{"time": None, "content": "❌ Content section not found."}
     
+
     raw_time = li_tag.get_text(strip=True)
     time_str = raw_time.replace("Updated", "").replace("IST", "").replace(",", "").strip()
-    dt_naive = datetime.strptime(time_str, "%b %d %Y %I:%M %p")
+    
+    try:
+        dt_naive = datetime.strptime(time_str, "%b %d %Y %I:%M %p")
+        IST = timezone(timedelta(hours=5, minutes=30))
+        GMT7 = timezone(timedelta(hours=7))
+        dt_ist = dt_naive.replace(tzinfo=IST)
+        dt_gmt7 = dt_ist.astimezone(GMT7)
+    except ValueError:
+        dt_naive = None
+        dt_gmt7 = None
 
-    # Step 4: Define timezones
-    IST = timezone(timedelta(hours=5, minutes=30))
-    GMT7 = timezone(timedelta(hours=7))
-
-    # Step 5: Convert from IST to GMT+7
-    dt_ist = dt_naive.replace(tzinfo=IST)
-    dt_gmt7 = dt_ist.astimezone(GMT7)
-
-
+    
     # Extract the main content of the page
     main_div = soup.find('div', class_='story_witha_main_sec')
     if not main_div:
