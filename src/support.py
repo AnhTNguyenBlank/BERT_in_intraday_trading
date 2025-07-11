@@ -20,6 +20,8 @@ import pandas as pd
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
 import time
 from bs4 import BeautifulSoup
 import requests
@@ -28,8 +30,6 @@ from datetime import datetime, timedelta, timezone
 from tqdm import tqdm
 import contextlib
 import os
-
-
 
 
 def prepare_df(df, timeframe, add_indicators):
@@ -657,7 +657,7 @@ def plot_positions_rt(trading_symbols, df_positions):
 # =================================== Web scraping data (news) support =================================== #
 
 
-def set_up_driver(num_clicks, time_sleep_open, time_sleep_clicks):
+def set_up_driver(num_clicks, time_sleep_open):
     '''
     This function only supports the scraping from this site: "https://www.businesstoday.in/news".
     It may support other sites but hadnot been tested on.
@@ -666,16 +666,16 @@ def set_up_driver(num_clicks, time_sleep_open, time_sleep_clicks):
     # Setup headless Chrome
     options = Options()
     options.headless = True
+    options.add_argument("--headless=new")
     options.add_argument("--log-level=3")  # Only FATAL
     options.add_argument("--disable-logging")
     options.add_argument("--disable-dev-shm-usage")
-    options.add_argument("--no-sandbox")
+    # options.add_argument("--no-sandbox")
     options.add_experimental_option("excludeSwitches", ["enable-logging"])
 
     # Redirect stderr (to hide native logs from Chrome/TensorFlow/C++)
     with open(os.devnull, 'w') as fnull, contextlib.redirect_stderr(fnull):
         driver = webdriver.Chrome(options=options)
-
 
     # Open the news page
     driver.get("https://www.businesstoday.in/news")
@@ -683,14 +683,15 @@ def set_up_driver(num_clicks, time_sleep_open, time_sleep_clicks):
 
     # Click the "Load More" button multiple times
     for _ in tqdm(range(num_clicks), desc="Loading more articles", unit = 'page'):  # Adjust range for more clicks
-        try:
-            load_more_button = driver.find_element(By.ID, "load_more")
-            driver.execute_script("arguments[0].scrollIntoView();", load_more_button)
-            driver.execute_script("arguments[0].click();", load_more_button)
-            time.sleep(time_sleep_clicks)  # Wait for new articles to load
-        except Exception as e:
-            print("No more content or error:", e)
-            break
+        load_more_button = driver.find_element(By.ID, "load_more")
+        driver.execute_script("arguments[0].scrollIntoView();", load_more_button)
+        driver.execute_script("arguments[0].click();", load_more_button)
+        
+        # Wait until the spinner disappears, no matter how long it takes
+        WebDriverWait(driver, timeout=60).until(
+            EC.invisibility_of_element_located((By.CLASS_NAME, "circular_loader_container"))
+        )
+
     return(driver)
 
 
