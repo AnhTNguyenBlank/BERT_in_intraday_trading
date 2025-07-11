@@ -25,11 +25,21 @@ import pickle
 
 if __name__ == '__main__':
 
-    driver = set_up_driver(num_clicks = 1000, time_sleep_open = 5, time_sleep_clicks = 5)
+    # driver = set_up_driver(num_clicks = 1000, time_sleep_open = 8, time_sleep_clicks = 8)
 
-    # After loading all articles, parse page source with BeautifulSoup
-    soup = BeautifulSoup(driver.page_source, 'html.parser')
-    driver.quit()
+    # # After loading all articles, parse page source with BeautifulSoup
+    # soup = BeautifulSoup(driver.page_source, 'html.parser')
+    # driver.quit()
+
+    # # Save to file
+    # with open('D:/BERT_in_intraday_trading/Saved_results/page_source.html', 'w', encoding='utf-8') as f:
+    #     f.write(str(soup))
+
+
+    # Reload from file
+    with open('D:/BERT_in_intraday_trading/Saved_results/page_source.html', 'r', encoding='utf-8') as f:
+        html = f.read()
+    soup = BeautifulSoup(html, 'html.parser')
 
 
     stored_data = []
@@ -57,8 +67,8 @@ if __name__ == '__main__':
         stored_data.append(temp)
 
 
-    # with open("D:/BERT_in_intraday_trading/Training/Data/stored_data.pkl", "wb") as f:
-    #     pickle.dump(stored_data, f)
+    with open("D:/BERT_in_intraday_trading/Training/Data/stored_data.pkl", "wb") as f:
+        pickle.dump(stored_data, f)
 
     
     # import pickle
