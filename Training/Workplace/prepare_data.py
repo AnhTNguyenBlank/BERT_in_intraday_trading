@@ -72,6 +72,7 @@ if __name__ == '__main__':
 
     
     # Load the pickle file
+    
     with open("D:/BERT_in_intraday_trading/Training/Data/stored_data.pkl", "rb") as f:
         my_loaded_array = pickle.load(f)
 
