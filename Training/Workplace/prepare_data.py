@@ -25,56 +25,54 @@ import pickle
 
 if __name__ == '__main__':
 
-    # driver = set_up_driver(num_clicks = 1000, time_sleep_open = 8, time_sleep_clicks = 8)
+    # driver = set_up_driver(num_clicks = 1000, time_sleep_open = 5)
 
     # # After loading all articles, parse page source with BeautifulSoup
     # soup = BeautifulSoup(driver.page_source, 'html.parser')
     # driver.quit()
 
     # # Save to file
-    # with open('D:/BERT_in_intraday_trading/Saved_results/page_source.html', 'w', encoding='utf-8') as f:
+    # with open('D:/BERT_in_intraday_trading/Training/Saved_results/page_source.html', 'w', encoding='utf-8') as f:
     #     f.write(str(soup))
 
 
     # Reload from file
-    with open('D:/BERT_in_intraday_trading/Saved_results/page_source.html', 'r', encoding='utf-8') as f:
-        html = f.read()
-    soup = BeautifulSoup(html, 'html.parser')
+    # with open('D:/BERT_in_intraday_trading/Training/Saved_results/page_source.html', 'r', encoding='utf-8') as f:
+    #     html = f.read()
+    # soup = BeautifulSoup(html, 'html.parser')
 
 
-    stored_data = []
+    # stored_data = []
 
-    # Pre-filter relevant links first
-    valid_links = [
-        link for link in soup.find_all('a')
-        if link.string and len(link.string.strip()) > 35 and link.has_attr('href')
-    ]
+    # # Pre-filter relevant links first
+    # valid_links = [
+    #     link for link in soup.find_all('a')
+    #     if link.string and len(link.string.strip()) > 35 and link.has_attr('href')
+    # ]
 
-    for link in tqdm(valid_links, desc="Extracting articles' contents", unit = 'article'):
-        full_url = link['href']
-        time_posted, content = extract_article_content(full_url)
-        date_posted = link['href'][-10:]
-        title = link.string.strip()
+    # for link in tqdm(valid_links[6000:10000], desc="Extracting articles' contents", unit = 'article'):
+    #     full_url = link['href']
+    #     time_posted, content = extract_article_content(full_url)
+    #     date_posted = link['href'][-10:]
+    #     title = link.string.strip()
 
-        temp = dict()
+    #     temp = dict()
 
-        temp['TITLE'] = title
-        temp['URL'] = full_url
-        temp['DATE_POSTED'] = date_posted
-        temp['TIME_POSTED'] = time_posted
-        temp['CONTENT'] = content
+    #     temp['TITLE'] = title
+    #     temp['URL'] = full_url
+    #     temp['DATE_POSTED'] = date_posted
+    #     temp['TIME_POSTED'] = time_posted
+    #     temp['CONTENT'] = content
 
-        stored_data.append(temp)
+    #     stored_data.append(temp)
 
 
-    with open("D:/BERT_in_intraday_trading/Training/Data/stored_data.pkl", "wb") as f:
-        pickle.dump(stored_data, f)
+    # with open("D:/BERT_in_intraday_trading/Training/Data/stored_data_3.pkl", "wb") as f:
+    #     pickle.dump(stored_data, f)
 
     
-    # import pickle
+    # Load the pickle file
+    with open("D:/BERT_in_intraday_trading/Training/Data/stored_data.pkl", "rb") as f:
+        my_loaded_array = pickle.load(f)
 
-    # # Load the pickle file
-    # with open("D:/BERT_in_intraday_trading/Training/Data/stored_data.pkl", "rb") as f:
-    #     my_loaded_array = pickle.load(f)
-
-    # print(my_loaded_array)
+    print(my_loaded_array)
