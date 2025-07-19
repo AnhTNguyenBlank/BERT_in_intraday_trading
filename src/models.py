@@ -10,11 +10,15 @@ import matplotlib.pyplot as plt
 from src.support import *
 from src.models_support import *
 
+import tensorflow as tf
+import tensorflow_hub as hub
+from abc import ABC, abstractmethod
+import keras
+from keras import layers
 
 plt.style.use('classic')
 
-#=======================ALPHAS=======================
-
+#======================= ALPHAs =======================#
 
 class Base_Alpha:
     def __init__(self, strat, prepare_data):
@@ -353,3 +357,92 @@ class TA_strat_v1(Base_Alpha):
                             'TP'
                         ]))
        
+
+
+#======================= GAMMAs =======================#
+
+# Bert model for news extracting
+
+
+
+class GAMMA_BERT(keras.Model, ABC):
+    def __init__(self,
+            tfhub_handle_encoder,
+            tfhub_handle_preprocess,
+            loss_weight,
+            **kwargs):
+        super(GAMMA_BERT, self).__init__(**kwargs)
+
+        self.tfhub_handle_preprocess = tfhub_handle_preprocess
+        self.tfhub_handle_preprocess = tfhub_handle_preprocess
+        self.loss_weight = loss_weight
+        
+        self.total_loss_tracker = keras.metrics.Mean(name = "total_loss")
+
+        # binarycrossentropy distance between true and predicted FLAG_HIGH_RISK
+        self.binarycrossentropy_tracker = keras.metrics.Mean(name = "binarycrossentropy")
+
+        # mse distance between true and predicted ratio_mean_A_B
+        self.mse_mean_tracker = keras.metrics.Mean(name = "mse_mean")
+        
+        # mse distance between true and predicted ratio_var_A_B
+        self.mse_var_tracker = keras.metrics.Mean(name = "mse_var")
+        
+        self.bert = self._get_bert()
+        
+
+    def call(self, X):
+        results = self.bert(tf.constant([X]))
+        return results
+
+
+    def _get_bert(self):
+        text_input = tf.keras.layers.Input(shape = (), dtype = tf.string, name = 'text_input')
+        preprocessing_layer = hub.KerasLayer(self.tfhub_handle_preprocess, name = 'text_preprocessing')
+        encoder_inputs = preprocessing_layer(text_input)
+        encoder = hub.KerasLayer(self.tfhub_handle_encoder, trainable = True, name = 'BERT_encoder')
+        outputs = encoder(encoder_inputs)
+        net = outputs['pooled_output']
+        net = tf.keras.layers.Dropout(0.3)(net)
+        FLAG_HIGH_RISK = tf.keras.layers.Dense(1, activation = None, name = 'FLAG_high_risk')(net)
+        RATIO_MEAN = tf.keras.layers.Dense(1, activation = None, name = 'RATIO_MEAN')(net)
+        RATIO_VAR = tf.keras.layers.Dense(1, activation = 'relu', name = 'RATIO_VAR')(net)
+        
+        bert = tf.keras.Model(text_input, [FLAG_HIGH_RISK, RATIO_MEAN, RATIO_VAR])
+
+        return(bert)
+
+
+    def summary(self):
+        self.bert.summary()
+        
+
+    def train_step(self, X, y):
+        
+        flag_high_risk, ratio_mean, ratio_var = y
+        
+        with tf.GradientTape() as tape:
+
+            predicted_flag_high_risk, predicted_ratio_mean, predicted_ratio_var = self.bert(X)
+
+            binarycrossentropy = keras.losses.BinaryCrossentropy(from_logits = True)(flag_high_risk, predicted_flag_high_risk)
+            mse_mean = tf.keras.losses.MeanSquareError()(ratio_mean, predicted_ratio_mean)
+            mse_var = tf.keras.losses.MeanSquareError()(ratio_var, predicted_ratio_var)
+            
+            total_loss = self.loss_weight[0] * binarycrossentropy \
+                            + self.loss_weight[1] * mse_mean \
+                            + self.loss_weight[2] * mse_var
+            
+        grads = tape.gradient(total_loss, self.trainable_weights)
+        self.optimizer.apply_gradients(zip(grads, self.trainable_weights))
+        self.total_loss_tracker.update_state(total_loss)
+        self.binarycrossentropy_tracker.update_state(binarycrossentropy)
+        self.mse_mean_tracker.update_state(mse_mean)
+        self.mse_var_tracker.update_state(mse_var)
+
+        return {
+            "loss": self.total_loss_tracker.result(),
+            "reconstruction_loss_1": self.binarycrossentropy_tracker.result(),
+            "reconstruction_loss_2": self.mse_mean_tracker.result(),
+            "reconstruction_loss_3": self.mse_var_tracker.result()
+        }
