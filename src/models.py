@@ -373,7 +373,7 @@ class GAMMA_BERT(keras.Model, ABC):
             **kwargs):
         super(GAMMA_BERT, self).__init__(**kwargs)
 
-        self.tfhub_handle_preprocess = tfhub_handle_preprocess
+        self.tfhub_handle_encoder = tfhub_handle_encoder
         self.tfhub_handle_preprocess = tfhub_handle_preprocess
         self.loss_weight = loss_weight
         
