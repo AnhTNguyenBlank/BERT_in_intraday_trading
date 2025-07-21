@@ -12,6 +12,7 @@ from src.models_support import *
 
 import tensorflow as tf
 import tensorflow_hub as hub
+import tensorflow_text as text
 from abc import ABC, abstractmethod
 import keras
 from keras import layers
@@ -361,9 +362,22 @@ class TA_strat_v1(Base_Alpha):
 
 #======================= GAMMAs =======================#
 
+# Learning rate schedule with warmup
+
+class WarmUpLinearDecay(tf.keras.optimizers.schedules.LearningRateSchedule):
+    def __init__(self, initial_lr, warmup_steps, total_steps):
+        super().__init__()
+        self.initial_lr = initial_lr
+        self.warmup_steps = warmup_steps
+        self.total_steps = total_steps
+
+    def __call__(self, step):
+        step = tf.cast(step, tf.float32)
+        linear_decay = self.initial_lr * (1.0 - (step - self.warmup_steps) / (self.total_steps - self.warmup_steps))
+        warmup_lr = self.initial_lr * (step / self.warmup_steps)
+        return tf.cond(step < self.warmup_steps, lambda: warmup_lr, lambda: linear_decay)
+
 # Bert model for news extracting
-
-
 
 class GAMMA_BERT(keras.Model, ABC):
     def __init__(self,
@@ -442,7 +456,7 @@ class GAMMA_BERT(keras.Model, ABC):
 
         return {
             "loss": self.total_loss_tracker.result(),
-            "reconstruction_loss_1": self.binarycrossentropy_tracker.result(),
-            "reconstruction_loss_2": self.mse_mean_tracker.result(),
-            "reconstruction_loss_3": self.mse_var_tracker.result()
+            "binarycrossentropy": self.binarycrossentropy_tracker.result(),
+            "mse_mean": self.mse_mean_tracker.result(),
+            "mse_var": self.mse_var_tracker.result()
         }
