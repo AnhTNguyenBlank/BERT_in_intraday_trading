@@ -431,17 +431,27 @@ class GAMMA_BERT(keras.Model, ABC):
         self.bert.summary()
         
 
-    def train_step(self, X, y):
+    def train_step(self, data):
+        X, y = data
+        flag_high_risk = y[:, 0]
+        ratio_mean = y[:, 1]
+        ratio_var = y[:, 2]
         
-        flag_high_risk, ratio_mean, ratio_var = y
-        
+        tf.debugging.check_numerics(flag_high_risk, "flag_high_risk")
+        tf.debugging.check_numerics(ratio_mean, "ratio_mean")
+        tf.debugging.check_numerics(ratio_var, "ratio_var")
+
         with tf.GradientTape() as tape:
 
             predicted_flag_high_risk, predicted_ratio_mean, predicted_ratio_var = self.bert(X)
+            
+            tf.debugging.check_numerics(predicted_flag_high_risk, "predicted_flag_high_risk")
+            tf.debugging.check_numerics(predicted_ratio_mean, "predicted_ratio_mean")
+            tf.debugging.check_numerics(predicted_ratio_var, "predicted_ratio_var")
 
-            binarycrossentropy = keras.losses.BinaryCrossentropy(from_logits = True)(flag_high_risk, predicted_flag_high_risk)
-            mse_mean = tf.keras.losses.MeanSquareError()(ratio_mean, predicted_ratio_mean)
-            mse_var = tf.keras.losses.MeanSquareError()(ratio_var, predicted_ratio_var)
+            binarycrossentropy = tf.keras.losses.BinaryCrossentropy(from_logits = True)(flag_high_risk, predicted_flag_high_risk)
+            mse_mean = tf.keras.losses.MeanSquaredError()(ratio_mean, predicted_ratio_mean)
+            mse_var = tf.keras.losses.MeanSquaredError()(ratio_var, predicted_ratio_var)
             
             total_loss = self.loss_weight[0] * binarycrossentropy \
                             + self.loss_weight[1] * mse_mean \
