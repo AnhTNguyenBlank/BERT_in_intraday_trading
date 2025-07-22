@@ -465,8 +465,45 @@ class GAMMA_BERT(keras.Model, ABC):
         self.mse_var_tracker.update_state(mse_var)
 
         return {
-            "loss": self.total_loss_tracker.result(),
-            "binarycrossentropy": self.binarycrossentropy_tracker.result(),
-            "mse_mean": self.mse_mean_tracker.result(),
-            "mse_var": self.mse_var_tracker.result()
+            "train_loss": self.total_loss_tracker.result(),
+            "train_binarycrossentropy": self.binarycrossentropy_tracker.result(),
+            "train_mse_mean": self.mse_mean_tracker.result(),
+            "train_mse_var": self.mse_var_tracker.result()
+        }
+    
+
+    def test_step(self, data):
+        X, y = data
+        flag_high_risk = y[:, 0]
+        ratio_mean = y[:, 1]
+        ratio_var = y[:, 2]
+
+        tf.debugging.check_numerics(flag_high_risk, "flag_high_risk")
+        tf.debugging.check_numerics(ratio_mean, "ratio_mean")
+        tf.debugging.check_numerics(ratio_var, "ratio_var")
+
+        predicted_flag_high_risk, predicted_ratio_mean, predicted_ratio_var = self.bert(X)
+
+        tf.debugging.check_numerics(predicted_flag_high_risk, "predicted_flag_high_risk")
+        tf.debugging.check_numerics(predicted_ratio_mean, "predicted_ratio_mean")
+        tf.debugging.check_numerics(predicted_ratio_var, "predicted_ratio_var")
+
+        binarycrossentropy = tf.keras.losses.BinaryCrossentropy(from_logits=True)(flag_high_risk, predicted_flag_high_risk)
+        mse_mean = tf.keras.losses.MeanSquaredError()(ratio_mean, predicted_ratio_mean)
+        mse_var = tf.keras.losses.MeanSquaredError()(ratio_var, predicted_ratio_var)
+
+        total_loss = self.loss_weight[0] * binarycrossentropy \
+                    + self.loss_weight[1] * mse_mean \
+                    + self.loss_weight[2] * mse_var
+
+        self.total_loss_tracker.update_state(total_loss)
+        self.binarycrossentropy_tracker.update_state(binarycrossentropy)
+        self.mse_mean_tracker.update_state(mse_mean)
+        self.mse_var_tracker.update_state(mse_var)
+
+        return {
+            "val_loss": self.total_loss_tracker.result(),
+            "val_binarycrossentropy": self.binarycrossentropy_tracker.result(),
+            "val_mse_mean": self.mse_mean_tracker.result(),
+            "val_mse_var": self.mse_var_tracker.result()
         }
