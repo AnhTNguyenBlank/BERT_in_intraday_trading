@@ -59,9 +59,9 @@ if __name__ == '__main__':
                         tfhub_handle_preprocess = tfhub_handle_preprocess,
                         loss_weight = [1, 1, 1]
                         )
-    print('='*50)
+    print('='*100)
     print(bert_model.summary())
-    print('='*50)
+    print('='*100)
 
     # Hyperparameters
     init_lr = 3e-5
@@ -85,8 +85,18 @@ if __name__ == '__main__':
     print(f'Test binarycrossentropy: {test_binarycrossentropy}')
     print(f'Test mse mean: {test_mse_mean}')
     print(f'Test mse var: {test_mse_var}')
-    print('='*50)
+    print('='*100)
 
+
+    # Simulate a batch of input text (replace batch size and sequence with yours)
+    dummy_input = tf.constant(["sample text here"])  # shape = (1,)
+
+    # Call the model once to trace it
+    dummy_results = bert_model(dummy_input)
+    
+    print(f'Dummy texts: {dummy_input}')
+    print(f'Dummy results: {dummy_results}')
+    print('='*100)
     
     dataset_name = 'news_data'
     saved_model_path = 'D:/BERT_in_intraday_trading/Training/Saved_results/{}_bert'.format(dataset_name.replace('/', '_'))
