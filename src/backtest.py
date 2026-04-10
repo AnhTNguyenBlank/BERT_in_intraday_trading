@@ -3,332 +3,258 @@ import numpy as np
 
 pd.set_option('display.max_columns', 999)
 
-import ta
-import matplotlib.pyplot as plt
-
-plt.style.use('classic')
-from datetime import datetime, timedelta
+from scipy.stats import norm
 
 
-class Base_Asset:
-    def __init__(self, asset = 'XAUUSD'):
-        self.asset = asset
-        
-    def _cal_margins(self):
-        '''
-        margins_level = 1/100 #1/200 #1/1000 #1/2000
-        '''
-        if self.asset == 'XAUUSD':
-            # Base stats
-            self.lot_per_asset = 0.01
+class Evaluator:
+    """
+    Evaluates DeepARCH predictions against realized volatility proxies.
 
+    Parameters
+    ----------
+    compare_variance : bool
+        If True, compare sigma^2 (variance) scale.
+        If False (default), compare sigma (volatility) scale.
+    bandwidth : int or None
+        Bandwidth H for realized kernel estimators.
+        If None, uses H = ceil(M^(2/3)) where M is the number of intraday returns.
+    """
 
+    def __init__(self, compare_variance: bool = False, bandwidth: int = None):
+        self.compare_variance = compare_variance
+        self.bandwidth = bandwidth
 
-class Backtest_report:
-    def __init__(self, alpha, 
-                 df_is,
-                 base_SL = 10, base_TP = 20, 
-                 max_existing_positions = 3, init_vol = 0.01, incre_vol = 0.01, max_vol = 0.1,
-                 init_cap = 1000, incre_cap = 2, asset = 'XAUUSD', margins_level = 1/100, 
-                 re_allocation = True
-                 ):
-        
-        self.alpha = alpha # alpha class
-        self.df_is = df_is # data
-        self.init_vol = init_vol # initial volume
-        self.re_allocation = re_allocation
-        self.incre_vol = incre_vol # increment of volume
-        self.max_vol = max_vol # max value of volume
-        self.init_cap = init_cap # init capital
-        self.incre_cap = incre_cap # the condition of capital if increasing the trading volume
-        
-        self.asset = Base_Asset(asset = asset)
-        self.asset._cal_margins()
-        self.margins_level = margins_level
+    # ------------------------------------------------------------------
+    # Volatility proxies   (all return sigma^2 estimates, shape (N,1))
+    # ------------------------------------------------------------------
 
-        self.max_existing_positions = max_existing_positions
-        self.base_SL = base_SL
-        self.base_TP = base_TP    
+    @staticmethod
+    def realized_variance(intraday_returns: np.ndarray) -> np.ndarray:
+        """
+        RV_t = sum_{i=1}^{M} r_{t,i}^2
+        intraday_returns : (N, M)  — 1-min returns within each 15-min bar.
+        """
+        return np.sum(intraday_returns ** 2, axis=1, keepdims=True)           # (N, 1)
 
-        self.df_position_tracking = None
-        self.df_balance_tracking = None
-        self.df_balance_tracking_new = None
-         
+    @staticmethod
+    def bipower_variation(intraday_returns: np.ndarray) -> np.ndarray:
+        """
+        BV_t = (pi/2) * sum_{i=2}^{M} |r_{t,i}| * |r_{t,i-1}|
+        Consistent estimator of IV robust to jumps.
+        """
+        mu1 = np.sqrt(2 / np.pi)                      # E[|Z|], Z~N(0,1)
+        factor = 1.0 / mu1 ** 2                        # = pi/2
+        abs_r  = np.abs(intraday_returns)
+        bv     = factor * np.sum(abs_r[:, 1:] * abs_r[:, :-1], axis=1, keepdims=True)
+        return bv                                      # (N, 1)
 
-    def _track_positions(self, df_is, alpha):
+    @staticmethod
+    def median_realized_volatility(intraday_returns: np.ndarray) -> np.ndarray:
+        """
+        MedRV_t = (pi / (6 - 4*sqrt(3) + pi)) * (M/(M-2))
+                  * sum_{i=2}^{M-1} median(|r_{t,i-1}|, |r_{t,i}|, |r_{t,i+1}|)^2
+        Andersen, Dobrev & Schaumburg (2012) — jump + noise robust.
+        """
+        M      = intraday_returns.shape[1]
+        factor = (np.pi / (6 - 4 * np.sqrt(3) + np.pi)) * (M / (M - 2))
+        abs_r  = np.abs(intraday_returns)
 
-        df_signal = alpha.signal(df_is)
-        df_position_tracking = df_is[['CLOSE']].copy().merge(df_signal, how = 'left', on = 'DATE_TIME')
+        # stack rolling triplets: shape (N, M-2, 3)
+        triplets = np.stack(
+            [abs_r[:, :-2], abs_r[:, 1:-1], abs_r[:, 2:]], axis=2
+        )
+        med_sq  = np.median(triplets, axis=2) ** 2      # (N, M-2)
+        medrv   = factor * np.sum(med_sq, axis=1, keepdims=True)
+        return medrv                                    # (N, 1)
 
-        df_position_tracking['VOL'] = self.init_vol
-        signals = df_position_tracking[df_position_tracking['SIGNAL'] != 0]
+    @staticmethod
+    def _autocovariance(returns: np.ndarray, h: int) -> np.ndarray:
+        """gamma_h = sum_i r_i * r_{i+h},  shape (N, 1)."""
+        if h == 0:
+            return np.sum(returns ** 2, axis=1, keepdims=True)
+        return np.sum(returns[:, h:] * returns[:, :-h], axis=1, keepdims=True)
 
-        # Determine the time hitting TP/ SL
-        for ids in range(len(signals)):
-            s = signals.iloc[ids, :]
-            df_temp = df_position_tracking.loc[(df_position_tracking.index > s.name) 
-                    & (((df_position_tracking['CLOSE'] - s.CLOSE)*s.SIGNAL < s.SL*(-1)) | ((df_position_tracking['CLOSE'] - s.CLOSE)*s.SIGNAL > s.TP)), 
-                    :]
-            if len(df_temp) != 0:
-                df_position_tracking.loc[s.name, 'TIME_CLOSE_POSITION'] = df_temp.index[0]
-            else:
-                df_position_tracking.loc[s.name, 'TIME_CLOSE_POSITION'] = pd.NaT
-
-        signals = df_position_tracking[df_position_tracking['SIGNAL'] != 0]
-
-        # Create the column to determine valid position (total number of positions, margins)
-        df_position_tracking['FLAG_VALID_POSITION'] = np.where(df_position_tracking['SIGNAL'] != 0, 1, 0)
-        df_position_tracking['USED_MARGINS'] = -1 * df_position_tracking['VOL'] * np.abs(df_position_tracking['SIGNAL']) * self.margins_level * df_position_tracking['CLOSE'] / self.asset.lot_per_asset
-
-        # Adjust the FLAG_VALID_POSITION according to max_existing_positions
-        existing_positions = signals[:self.max_existing_positions]
-
-        for ids in range(len(signals)):
-            if ids >= self.max_existing_positions:
-                s = signals.iloc[ids, :]
-
-                if (s.name < existing_positions['TIME_CLOSE_POSITION'].min()) & (len(existing_positions) == self.max_existing_positions):
-                    df_position_tracking.loc[s.name, 'FLAG_VALID_POSITION'] = 0
-                else:
-                    df_position_tracking.loc[s.name, 'FLAG_VALID_POSITION'] = 1
-        
-                    existing_positions = existing_positions.loc[existing_positions['TIME_CLOSE_POSITION'] > s.name, :]
-                    existing_positions = pd.concat([existing_positions, pd.DataFrame(s).transpose()], axis = 0)
-
-
-        df_position_tracking['TIME_CLOSE_POSITION'] = np.where(df_position_tracking['FLAG_VALID_POSITION'] == 1, df_position_tracking['TIME_CLOSE_POSITION'], pd.NaT)
-        df_position_tracking['TIME_CLOSE_POSITION'] = pd.to_datetime(df_position_tracking['TIME_CLOSE_POSITION'])
-
-        df_position_tracking = df_position_tracking.merge(df_position_tracking[['CLOSE']], 
-                                                how = 'left', 
-                                                left_on = 'TIME_CLOSE_POSITION', 
-                                                right_index = True,
-                                                suffixes = ('_open', '_close')
-                                                )
-
-        # Calculate PNL
-        df_position_tracking['PNL'] = (df_position_tracking['CLOSE_close'] - df_position_tracking['CLOSE_open'])*df_position_tracking['SIGNAL']*df_position_tracking['FLAG_VALID_POSITION']*(self.init_vol*100)
-        df_position_tracking['PNL'] = np.where(df_position_tracking['PNL'] < self.base_SL*-1*(self.init_vol*100), self.base_SL*-1*(self.init_vol*100), 
-                                    np.where(df_position_tracking['PNL'] > self.base_TP*(self.init_vol*100), self.base_TP*(self.init_vol*100), 
-                                            np.where(df_position_tracking['PNL'].isnull() == True, 0, df_position_tracking['PNL'])))
-        df_position_tracking['PNL'] = np.where(df_position_tracking['FLAG_VALID_POSITION'] == 1, df_position_tracking['PNL'], 0)
-        
-
-        # Re-indexing the data
-
-        df_position_tracking = df_position_tracking.drop(columns=[col for col in df_position_tracking.columns if '_SCORE' in col])
-
-        df_position_tracking = df_position_tracking.reset_index()
-        df_position_tracking.columns = ['TIME_OPEN_POSITION', 'CLOSE_open', 
-                            'SIGNAL', 'SL', 'TP', 'VOL', 'TIME_CLOSE_POSITION', 
-                            'FLAG_VALID_POSITION', 'USED_MARGINS', 'CLOSE_close', 'PNL']
-
-        df_position_tracking['POSITION_ID'] = df_position_tracking['TIME_OPEN_POSITION'].view('int64')//10**9
-
-        df_position_tracking = df_position_tracking.loc[(df_position_tracking['FLAG_VALID_POSITION'] == 1) 
-                                & (df_position_tracking['TIME_CLOSE_POSITION'].isnull() == False), :]
-        
-        return(df_position_tracking)
-        
-    def _cal_balance(self, df_is, df_position_tracking, 
-                     cols_names = ['TIME_OPEN_POSITION', 'VOL', 'USED_MARGINS', 'POSITION_ID', 'TIME_CLOSE_POSITION', 'PNL']
-                     ):
-        # Calculate balance
-
-        df_tracking = pd.DataFrame(index = df_is.index)
-
-        df_tracking = df_tracking.merge(
-            pd.pivot_table(
-                df_position_tracking,
-                index = 'TIME_OPEN_POSITION',
-                values = [cols_names[1], cols_names[2], cols_names[3]],
-                aggfunc = 'sum'
-            ),
-            how = 'left',
-            left_index = True,
-            right_index = True
+    @staticmethod
+    def _parzen_kernel(x: np.ndarray) -> np.ndarray:
+        """Parzen kernel  k: [0,1] -> [0,1]."""
+        x = np.abs(x)
+        return np.where(
+            x <= 0.5,
+            1 - 6 * x**2 + 6 * x**3,
+            np.where(x <= 1.0, 2 * (1 - x)**3, 0.0)
         )
 
-        df_tracking.columns = ['OPEN_POSITION_ID', 'USED_MARGINS', 'OPEN_VOL']
+    @staticmethod
+    def _tukey_hanning_kernel(x: np.ndarray) -> np.ndarray:
+        """Tukey–Hanning kernel  k: [0,1] -> [0,1]."""
+        x = np.abs(x)
+        return np.where(x <= 1.0, 0.5 * (1 + np.cos(np.pi * x)), 0.0)
 
-        df_tracking = df_tracking.merge(
-            pd.pivot_table(
-                df_position_tracking,
-                index = cols_names[4],
-                values = [cols_names[1], cols_names[2], cols_names[5]],
-                aggfunc = 'sum'
-            ),
-            how = 'left',
-            left_index = True,
-            right_index = True
-        )
+    def _realized_kernel(
+        self,
+        intraday_returns: np.ndarray,
+        kernel_func
+    ) -> np.ndarray:
+        """
+        RK_t = gamma_0 + sum_{h=1}^{H} k(h / (H+1)) * (gamma_h + gamma_{-h})
+             = gamma_0 + 2 * sum_{h=1}^{H} k(h/(H+1)) * gamma_h
+        Barndorff-Nielsen et al. (2008).
+        """
+        M = intraday_returns.shape[1]
+        H = self.bandwidth if self.bandwidth is not None else int(np.ceil(M ** (2 / 3)))
 
-        df_tracking.columns = ['OPEN_POSITION_ID', 'USED_MARGINS', 'OPEN_VOL', 'PNL', 'ADDITIONAL_MARGINS', 'CLOSED_VOL']
-        df_tracking = df_tracking.fillna(0)
+        rk = self._autocovariance(intraday_returns, 0)    # gamma_0 = RV
+        for h in range(1, H + 1):
+            k_h   = kernel_func(np.array(h / (H + 1)))
+            gamma = self._autocovariance(intraday_returns, h)
+            rk   += 2 * k_h * gamma
+        return rk                                          # (N, 1)
 
-        df_tracking['OPEN_POSITION_ID'] = df_tracking['OPEN_POSITION_ID'].astype(str)
-        df_tracking['CLOSED_VOL'] = df_tracking['CLOSED_VOL']*-1
-        df_tracking['ADDITIONAL_MARGINS'] = df_tracking['ADDITIONAL_MARGINS']*-1
+    def rk_parzen(self, intraday_returns: np.ndarray) -> np.ndarray:
+        return self._realized_kernel(intraday_returns, self._parzen_kernel)
 
-        df_tracking['NUM_CURRENT_POSITIONS'] = df_tracking['OPEN_VOL'].cumsum() + df_tracking['CLOSED_VOL'].cumsum()
-        df_tracking['NUM_CURRENT_POSITIONS'] = df_tracking['NUM_CURRENT_POSITIONS'].astype(float)
+    def rk_tukey_hanning(self, intraday_returns: np.ndarray) -> np.ndarray:
+        return self._realized_kernel(intraday_returns, self._tukey_hanning_kernel)
 
-        df_tracking['BALANCE'] = df_tracking['PNL'].cumsum() + self.init_cap
-        df_tracking['FREE_MARGINS'] = df_tracking['BALANCE'] + df_tracking['USED_MARGINS'].cumsum() + df_tracking['ADDITIONAL_MARGINS'].cumsum()
-        df_tracking['DRAWDOWN'] = np.where(df_tracking['PNL'] < 0, df_tracking['PNL']/(df_tracking['BALANCE'] - df_tracking['PNL']), 0)
-        
+    # ------------------------------------------------------------------
+    # Metrics
+    # ------------------------------------------------------------------
 
-        return(df_tracking)
+    @staticmethod
+    def _mse(pred: np.ndarray, target: np.ndarray) -> float:
+        return float(np.mean((pred - target) ** 2))
 
-    def _re_balance(self, df_position_tracking, df_balance_tracking):
-        # Reallocating the capital
-        
-        idt = self.df_balance_tracking.index[0]
-        cap = self.init_cap
-        vol = self.init_vol
-
-        df_position_tracking['NEW_VOL'] = df_position_tracking['VOL']
-        df_position_tracking['NEW_USED_MARGINS'] = df_position_tracking['USED_MARGINS']
-        df_position_tracking['NEW_PNL'] = df_position_tracking['PNL']
-
-        for idd, d in enumerate(df_balance_tracking.index): 
-            if df_balance_tracking.loc[d, 'BALANCE']/cap >= self.incre_cap:
-                idt =  d
-                cap *= self.incre_cap
-                vol += self.incre_vol
-
-                if vol >= self.max_vol:
-                    vol = self.max_vol
-
-                df_position_tracking.loc[df_position_tracking['TIME_OPEN_POSITION'] > idt, 'NEW_VOL'] = vol
-                df_position_tracking['NEW_USED_MARGINS'] = -1 * df_position_tracking['NEW_VOL'] * np.abs(df_position_tracking['SIGNAL']) * self.margins_level * df_position_tracking['CLOSE_open'] / self.asset.lot_per_asset
-                
-                df_position_tracking['NEW_PNL'] = (df_position_tracking['CLOSE_close'] - df_position_tracking['CLOSE_open'])*df_position_tracking['SIGNAL']*df_position_tracking['FLAG_VALID_POSITION']*(df_position_tracking['NEW_VOL']*100)
-                df_position_tracking['NEW_PNL'] = np.where(df_position_tracking['NEW_PNL'] < self.base_SL*-1*(df_position_tracking['NEW_VOL']*100), self.base_SL*-1*(df_position_tracking['NEW_VOL']*100), 
-                                            np.where(df_position_tracking['NEW_PNL'] > self.base_TP*(df_position_tracking['NEW_VOL']*100), self.base_TP*(df_position_tracking['NEW_VOL']*100), 
-                                                    np.where(df_position_tracking['NEW_PNL'].isnull() == True, 0, df_position_tracking['NEW_PNL'])))
-                df_position_tracking['NEW_PNL'] = np.where(df_position_tracking['FLAG_VALID_POSITION'] == 1, df_position_tracking['NEW_PNL'], 0)
-        
-
-        df_position_tracking['NEW_VOL'] = np.where(df_position_tracking['NEW_VOL'].isnull(), df_position_tracking['VOL'], df_position_tracking['NEW_VOL'])
-        df_position_tracking['NEW_USED_MARGINS'] = np.where(df_position_tracking['NEW_USED_MARGINS'].isnull(), df_position_tracking['USED_MARGINS'], df_position_tracking['NEW_USED_MARGINS'])
-        df_position_tracking['NEW_PNL'] = np.where(df_position_tracking['NEW_PNL'] == 0, df_position_tracking['PNL'], df_position_tracking['NEW_PNL'])
-
-
-        df_temp = df_position_tracking[['TIME_OPEN_POSITION', 'NEW_VOL', 'NEW_USED_MARGINS', 'POSITION_ID', 'TIME_CLOSE_POSITION', 'NEW_PNL']].copy()
-        df_temp.columns = ['TIME_OPEN_POSITION', 'VOL', 'USED_MARGINS', 'POSITION_ID', 'TIME_CLOSE_POSITION', 'PNL']    
-
-        df_balance_tracking_new = self._cal_balance(df_is = self.df_is, df_position_tracking = df_temp)
-        return(df_position_tracking, df_balance_tracking_new)
-
-    def prepare_report(self):
-        df_position_tracking = self._track_positions(df_is = self.df_is,
-                                        alpha = self.alpha)
-
-        df_balance_tracking = self._cal_balance(df_is = self.df_is, 
-                                        df_position_tracking = df_position_tracking)
-
-        self.df_position_tracking = df_position_tracking
-        self.df_balance_tracking = df_balance_tracking
-                 
-        if self.re_allocation:
-            self.df_position_tracking, self.df_balance_tracking_new = self._re_balance(df_position_tracking = self.df_position_tracking, df_balance_tracking = self.df_balance_tracking)    
-
-    def display_report(self):
-        if self.df_position_tracking.empty and self.df_balance_tracking.empty:
-            self.prepare_report()
-
-        if self.re_allocation:
-            size = (35, 30)
-        else:
-            size = (35, 20)
-
-        fig = plt.figure(figsize = size)
-
-        ax = fig.add_subplot(5, 1, 1)
-        ax.plot(self.df_balance_tracking.loc[self.df_balance_tracking['BALANCE'] > 0, 'BALANCE'], color = 'blue', label = 'BALANCE')
-        ax.plot(self.df_balance_tracking.loc[self.df_balance_tracking['BALANCE'] > 0, 'FREE_MARGINS'], color = 'green', label = 'FREE_MARGINS', alpha = 0.5)
-
-        ax_0 = ax.twinx()
-        ax_0.plot(self.df_balance_tracking.loc[self.df_balance_tracking['BALANCE'] > 0, 'DRAWDOWN'], color = 'red', alpha = 0.5, label = 'DRAWDOWN')
-        ax_0.hlines(y = -0.05, xmin = self.df_balance_tracking.loc[self.df_balance_tracking['BALANCE'] > 0, :].index[0], 
-                    xmax = self.df_balance_tracking.loc[self.df_balance_tracking['BALANCE'] > 0, :].index[-1], 
-                    color='r', linestyles = '--', alpha = 0.3)
-        
-        ax.legend(bbox_to_anchor = (1.15, 1))
-        ax_0.legend(bbox_to_anchor = (1.15, 0.8))
-        ax.set_title('Original Balance and Drawdown (No re-allocation)')
-        
-        
-        df_summary = pd.concat(
-            [
-                pd.pivot_table(
-                    self.df_position_tracking[(self.df_position_tracking['FLAG_VALID_POSITION'] == 1) & (self.df_position_tracking['SIGNAL'] != 0) & (self.df_position_tracking['PNL'] > 0)],
-                    index = 'SIGNAL',
-                    values = 'CLOSE_open',
-                    aggfunc = 'count',
-                    margins = True
-                ),
-                pd.pivot_table(
-                    self.df_position_tracking[(self.df_position_tracking['FLAG_VALID_POSITION'] == 1) & (self.df_position_tracking['SIGNAL'] != 0) & (self.df_position_tracking['PNL'] < 0)],
-                    index = 'SIGNAL',
-                    values = 'CLOSE_open',
-                    aggfunc = 'count',
-                    margins = True
-                )
-            ],
-            axis = 1
-        )
-
-        df_summary.columns = ['WINNING_POSITIONS', 'LOSING_POSITIONS']
-        df_summary.index = ['SHORT', 'LONG', 'ALL']
-        df_summary = df_summary.fillna(0)
-        df_summary['TOTAL_POSITIONS'] = df_summary['WINNING_POSITIONS'] + df_summary['LOSING_POSITIONS']
-        
-        df_summary['PERC_WINNING_POSITIONS'] = df_summary['WINNING_POSITIONS']/df_summary['TOTAL_POSITIONS']
-        df_summary['PERC_LOSING_POSITIONS'] = df_summary['LOSING_POSITIONS']/df_summary['TOTAL_POSITIONS']
-        df_summary['PERC_TOTAL_POSITIONS'] = df_summary['TOTAL_POSITIONS']/df_summary['TOTAL_POSITIONS']
-        
-        ax = fig.add_subplot(5, 1, 2)
-        bars1 = ax.bar(df_summary.index, df_summary['PERC_WINNING_POSITIONS'], color = 'green', label = 'WINNING_POSITIONS')
-        bars2 = ax.bar(df_summary.index, df_summary['PERC_LOSING_POSITIONS'], bottom = df_summary['PERC_WINNING_POSITIONS'], color = 'red', label = 'LOSING_POSITIONS')
-        
-        # Add data labels
-        ax.bar_label(bars1, labels=[f'{v}' for v in df_summary['WINNING_POSITIONS']], padding = -100)
-        ax.bar_label(bars2, labels=[f'{v}' for v in df_summary['LOSING_POSITIONS']], padding = -100)
-
-
-        ax.legend()
-        ax.set_title('Distribution of winning/ losing positions')
-
-        ax = fig.add_subplot(5, 1, 3)
-        ax.plot(self.df_balance_tracking.loc[self.df_balance_tracking['BALANCE'] > 0, 'NUM_CURRENT_POSITIONS'], color = 'blue', label = 'NUM_CURRENT_POSITIONS')
-        ax.legend(bbox_to_anchor = (1.15, 1))        
-        ax.set_title('Number of positions')
-
-        if self.re_allocation:
-            ax = fig.add_subplot(5, 1, 4)
-
-            ax.plot(self.df_balance_tracking_new.loc[self.df_balance_tracking_new['BALANCE'] > 0, 'BALANCE'], color = 'blue', label = 'BALANCE')
-            ax.plot(self.df_balance_tracking_new.loc[self.df_balance_tracking_new['BALANCE'] > 0, 'FREE_MARGINS'], color = 'green', label = 'FREE_MARGINS', alpha = 0.5)
-
-            ax_0 = ax.twinx()
-            ax_0.plot(self.df_balance_tracking_new.loc[self.df_balance_tracking_new['BALANCE'] > 0, 'DRAWDOWN'], color = 'red', alpha = 0.5, label = 'DRAWDOWN')
-            ax_0.hlines(y = -0.05, xmin = self.df_balance_tracking_new.loc[self.df_balance_tracking_new['BALANCE'] > 0, :].index[0], 
-                        xmax = self.df_balance_tracking_new.loc[self.df_balance_tracking_new['BALANCE'] > 0, :].index[-1], 
-                        color='r', linestyles = '--', alpha = 0.3)
-            
-            ax.legend(bbox_to_anchor = (1.15, 1))
-            ax_0.legend(bbox_to_anchor = (1.15, 0.8))    
-            ax.set_title('New Balance and Drawdown (with re-allocation)')
-          
-            ax = fig.add_subplot(5, 1, 5)
-            ax.plot(self.df_balance_tracking_new.loc[self.df_balance_tracking_new['BALANCE'] > 0, 'NUM_CURRENT_POSITIONS'], color = 'blue', label = 'NUM_CURRENT_POSITIONS')
-            ax.legend(bbox_to_anchor = (1.15, 1))
-            ax.set_ylim((0, 0.1))
-            ax.set_title('Volume')
-
-
+    @staticmethod
+    def _mae(pred: np.ndarray, target: np.ndarray) -> float:
+        return float(np.mean(np.abs(pred - target)))
     
+    @staticmethod
+    def _qloss(log_sigma2, returns_target, alpha_level: float) -> float:
+        log_sigma2     = np.array(log_sigma2)
+        returns_target = np.array(returns_target)
 
-        plt.show()
+        z_alpha   = norm.ppf(alpha_level)
+        sigma     = np.exp(0.5 * log_sigma2)
+        var_t     = z_alpha * sigma
+
+        indicator = (returns_target < var_t).astype(float)
+        loss      = (alpha_level - indicator) * (returns_target - var_t)
+        return float(np.sum(loss))
+
+    @staticmethod
+    def _jointloss(log_sigma2, returns_target, alpha_level: float) -> float:
+        log_sigma2     = np.array(log_sigma2, dtype=np.float64)
+        returns_target = np.array(returns_target, dtype=np.float64)
+
+        z_alpha = norm.ppf(alpha_level)
+        sigma   = np.clip(np.exp(0.5 * log_sigma2), 1e-8, None)   # prevent /0
+
+        Q_t  = z_alpha * sigma
+        ES_t = -sigma * norm.pdf(z_alpha) / alpha_level
+
+        ratio     = (alpha_level - 1) / ES_t
+        indicator = (returns_target < Q_t).astype(float)
+        term1     = -np.log(ratio)
+        term2     = -(returns_target - Q_t) * (alpha_level - indicator) / (alpha_level * ES_t)
+
+        return float(np.mean(term1 + term2))
+
+    @staticmethod
+    def _nll(log_sigma2: np.ndarray, returns_target: np.ndarray) -> float:
+        """
+        Gaussian negative log-likelihood (matches training objective).
+
+        NLL = (1/T) * sum_t [ log(sigma_t^2) + r_t^2 / sigma_t^2 ]
+
+        Parameters
+        ----------
+        log_sigma2     : (N, 1)  model output
+        returns_target : (N, 1)  realized returns r_t
+        """
+        sigma2 = np.exp(log_sigma2) + 1e-6
+
+        loss = np.mean(log_sigma2 + returns_target**2 / sigma2)
+        return float(loss)
+
+
+    # ------------------------------------------------------------------
+    # Main evaluation entry-point
+    # ------------------------------------------------------------------
+
+    def evaluate(self, log_sigma2,
+                returns_target,
+                alpha_levels: np.ndarray, 
+                intraday_returns: np.ndarray) -> pd.DataFrame:
+        """
+        Parameters
+        ----------
+        log_sigma2: np.ndarray  (N, 1)
+            Log-variance estimates.
+        returns_target: np.ndarray (N, 1)
+            real value of r(t+1)
+        alpha_levels:
+            for VaR and CVar calculation 
+        intraday_returns: np.ndarray  (N, M)
+            1-min returns for each 15-min observation window.
+            M = 15 for 15-min bars built from 1-min data.
+
+        Returns
+        -------
+        pd.DataFrame  — rows = proxies, columns = [MSE, MAE]
+        """
+        # ---- model prediction ----------------------------------------
+        sigma2_hat = np.exp(log_sigma2)
+
+        # ---- all proxies (variance scale) ----------------------------
+        proxies = {
+            "RV"              : self.realized_variance(intraday_returns),
+            "BV"              : self.bipower_variation(intraday_returns),
+            "MedRV"           : self.median_realized_volatility(intraday_returns),
+            "RK_Parzen"       : self.rk_parzen(intraday_returns),
+            "RK_TukeyHanning" : self.rk_tukey_hanning(intraday_returns),
+        }
+
+        proxies = {k: np.array(v, dtype=np.float64) for k, v in proxies.items()}
+
+        # ---- optionally convert to volatility scale ------------------
+        if self.compare_variance:
+            pred = sigma2_hat
+            targets = proxies
+        else:
+            pred    = np.sqrt(np.clip(sigma2_hat, 0, None))
+            targets = {k: np.sqrt(np.clip(v, 0, None)) for k, v in proxies.items()}
+
+        # ---- collect metrics -----------------------------------------
+        records = []
+        for name, tgt in targets.items():
+            records.append({
+                "Proxy" : name,
+                "MSE"   : self._mse(pred, tgt),
+                "MAE"   : self._mae(pred, tgt),
+            })
+
+        q_loss_arr = []
+        jointloss_arr = []
+        
+        for alpha in alpha_levels:
+            q_loss_arr.append(self._qloss(log_sigma2, returns_target, alpha))       
+            jointloss_arr.append(self._jointloss(log_sigma2, returns_target, alpha))
+                
+        results_tail = pd.DataFrame(
+            {"QLOSS": q_loss_arr, "JOINTLOSS": jointloss_arr},
+            index = alpha_levels,                      
+        )
+        results_tail.index.name = "alpha"
+        
+        NLL = self._nll(log_sigma2, returns_target)
+
+        results_error = pd.DataFrame(records).set_index("Proxy")
+        return results_error, results_tail, NLL
+
+
+
+
+
+
+
+        
