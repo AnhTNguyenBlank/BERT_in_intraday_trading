@@ -16,10 +16,14 @@ import pickle
 import tensorflow as tf
 
 import os
+from arch import arch_model
 
 from src.support import *
 from src.models import DeepARCH, DeepRARCH, DeepLLMRARCH
 
+import json
+import pickle
+from pathlib import Path
 
 if __name__ == '__main__':
 
@@ -144,29 +148,114 @@ if __name__ == '__main__':
     data = data.merge(intraday_returns, left_index= True, right_index = True, how = 'left').dropna().values
     
     N = len(data)
-    num_samples = N - 20
+    window = 20
+    num_samples = N - window
 
-    r_seq = np.zeros((num_samples, 20))
-    rv_seq = np.zeros((num_samples, 20))
+    r_seq = np.zeros((num_samples, window))
+    rv_seq = np.zeros((num_samples, window))
     r_target = np.zeros((num_samples, 1))  # r_t
     rv_target = np.zeros((num_samples, 1))  # rv_t
     text = np.empty((num_samples, 1), dtype=object)
 
     for i in range(num_samples):
-        r_seq[i, :] = data[i:i+20, 0]      # past 20 returns
-        rv_seq[i, :] = data[i:i+20, 1]      # past 20 rv
+        r_seq[i, :] = data[i:i+window, 0]      # past returns
+        rv_seq[i, :] = data[i:i+window, 1]      # past rv
+        text[i, 0] = data[i+window-1, 2]     # news
 
-        r_target[i, 0] = data[i+20, 0]     # next return
-        rv_target[i, 0] = data[i+20, 1]     # next rv
-        text[i, 0] = data[i+20, 2]     # next return
-
+        r_target[i, 0] = data[i+window, 0]     # next return
+        rv_target[i, 0] = data[i+window, 1]     # next rv
+        
     r_seq = tf.expand_dims(r_seq, axis=-1)
     rv_seq = tf.expand_dims(rv_seq, axis=-1)
     text = tf.squeeze(text)
     r_target = tf.convert_to_tensor(r_target)
     rv_target = tf.convert_to_tensor(rv_target)
 
-    intraday_returns = data[20:, 3:]
+    intraday_returns = data[window:, 3:]
+    train_size = int(num_samples * 0.6)
+
+    # sequences
+    r_seq_train = r_seq[:train_size]
+    r_seq_test = r_seq[train_size:]
+
+    rv_seq_train = rv_seq[:train_size]
+    rv_seq_test = rv_seq[train_size:]
+
+    # targets
+    r_target_train = r_target[:train_size]
+    r_target_test = r_target[train_size:]
+
+    rv_target_train = rv_target[:train_size]
+    rv_target_test = rv_target[train_size:]
+
+    # text
+    text_train = text[:train_size]
+    text_test = text[train_size:]
+
+    # intraday returns
+    intraday_train = intraday_returns[:train_size]
+    intraday_test = intraday_returns[train_size:]
+
+    # GARCH(1,1)
+    train_returns = r_target_train[:, 0].numpy()
+    test_returns = r_target_test[:, 0].numpy()
+
+    am = arch_model(train_returns)
+    res = am.fit(update_freq=5)
+    
+    save_dir = Path("/content/drive/MyDrive/Projects/BERT_in_intraday_trading/Training/Saved_results")
+    save_dir.mkdir(parents=True, exist_ok=True)
+
+    params_dict = {
+        k: float(v)
+        for k, v in res.params.items()
+    }
+
+    # save as jsonl
+    jsonl_path = save_dir / "garch_params.jsonl"
+
+    with open(jsonl_path, "w") as f:
+        f.write(json.dumps(params_dict) + "\n")
+
+    log_sigma2_GARCH_train = np.log(res.conditional_volatility**2 + 1e-8)
+
+    omega = res.params['omega']
+    alpha = res.params['alpha[1]']
+    beta = res.params['beta[1]']
+
+    # training conditional volatility
+    train_sigma2 = res.conditional_volatility**2
+
+    # initialize with last train variance
+    last_sigma2 = train_sigma2[-1]
+
+    test_sigma2 = np.zeros(len(test_returns))
+
+    for t in range(len(test_returns)):
+
+        if t == 0:
+            prev_return = train_returns[-1]
+            prev_sigma2 = last_sigma2
+        else:
+            prev_return = test_returns[t-1]
+            prev_sigma2 = test_sigma2[t-1]
+
+        test_sigma2[t] = (
+            omega
+            + alpha * prev_return**2
+            + beta * prev_sigma2
+        )
+
+    log_sigma2_GARCH_test = np.log(test_sigma2)
+
+    train_pickle_path = save_dir / "log_sigma2_GARCH_train.pkl"
+    test_pickle_path  = save_dir / "log_sigma2_GARCH_test.pkl"
+
+    with open(train_pickle_path, "wb") as f:
+        pickle.dump(log_sigma2_GARCH_train, f)
+
+    with open(test_pickle_path, "wb") as f:
+        pickle.dump(log_sigma2_GARCH_test, f)
 
     # Deep ARCH
 
@@ -175,8 +264,6 @@ if __name__ == '__main__':
     dummy = tf.zeros((1, 20, 1))   # example
     deep_arch(dummy)
 
-    print(deep_arch.summary())
-    
     history = deep_arch.fit(
         r_seq, r_target,
         epochs = 200,
@@ -202,23 +289,37 @@ if __name__ == '__main__':
 
     plt.show()
 
+    log_sigma2_DA_train = deep_arch.predict(r_seq_train)
+    log_sigma2_DA_test = deep_arch.predict(r_seq_test)
+
+    save_dir = Path("/content/drive/MyDrive/Projects/BERT_in_intraday_trading/Training/Saved_results")
+    save_dir.mkdir(parents=True, exist_ok=True)
+
+    deep_arch.save_weights(os.path.join(save_dir, "deep_arch.weights.h5"))
+
+    with open(save_dir / "log_sigma2_DA_train.pkl", "wb") as f:
+        pickle.dump(log_sigma2_DA_train, f)
+
+    with open(save_dir / "log_sigma2_DA_test.pkl", "wb") as f:
+        pickle.dump(log_sigma2_DA_test, f)
+
     # Deep Realized ARCH
 
     deep_rarch = DeepRARCH(lstm_units = 20)
     deep_rarch.compile(optimizer = tf.keras.optimizers.Adam(1e-3))
 
-
     dummy = tf.zeros((1, 20, 1))   # example
-    deep_rarch(dummy, dummy)
+    deep_rarch((dummy, dummy))
 
     print(deep_rarch.summary())
 
     history = deep_rarch.fit(
-        (r_seq, rv_seq),
-        (r_target, rv_target),
-        epochs = 200,
-        batch_size = 128
+        x=[r_seq_train, rv_seq_train],
+        y=[r_target_train, rv_target_train],
+        epochs=200,
+        batch_size=128
     )
+
     fig,ax = plt.subplots()
     l1 = ax.plot(history.history['loss'],
                 #  color="red",
@@ -238,21 +339,57 @@ if __name__ == '__main__':
 
     plt.show()
 
+    pred_log_sigma2, pred_rv_hat, pred_log_sigmau2 = deep_rarch.predict((r_seq_train, rv_seq_train))
+
+    log_sigma2_DRA_train = pred_log_sigma2.squeeze()
+    rv_hat_DRA_train = pred_rv_hat.squeeze()
+    log_sigmau2_DRA_train = pred_log_sigmau2[0]
+
+    pred_log_sigma2, pred_rv_hat, pred_log_sigmau2 = deep_rarch.predict((r_seq_test, rv_seq_test))
+
+    log_sigma2_DRA_test = pred_log_sigma2.squeeze()
+    rv_hat_DRA_test = pred_rv_hat.squeeze()
+    log_sigmau2_DRA_test = pred_log_sigmau2[0]
+
+    save_dir = Path("/content/drive/MyDrive/Projects/BERT_in_intraday_trading/Training/Saved_results")
+    save_dir.mkdir(parents=True, exist_ok=True)
+
+    deep_rarch.save_weights(os.path.join(save_dir, "deep_rarch.weights.h5"))
+
+    with open(save_dir / "log_sigma2_DRA_train.pkl", "wb") as f:
+        pickle.dump(log_sigma2_DRA_train, f)
+
+    with open(save_dir / "log_sigma2_DRA_test.pkl", "wb") as f:
+        pickle.dump(log_sigma2_DRA_test, f)
+
+    with open(save_dir / "rv_hat_DRA_train.pkl", "wb") as f:
+        pickle.dump(rv_hat_DRA_train, f)
+
+    with open(save_dir / "rv_hat_DRA_test.pkl", "wb") as f:
+        pickle.dump(rv_hat_DRA_test, f)
+
+    with open(save_dir / "log_sigmau2_DRA_train.pkl", "wb") as f:
+        pickle.dump(log_sigmau2_DRA_train, f)
+
+    with open(save_dir / "log_sigmau2_DRA_test.pkl", "wb") as f:
+        pickle.dump(log_sigmau2_DRA_test, f)
+
+
     # Deep LLM RARCH
     
-    deep_llmrarch = DeepLLMRARCH(lstm_units = 20)
-    deep_llmrarch.compile(optimizer = tf.keras.optimizers.Adam(1e-3))
+    deep_llm_rarch = DeepLLMRARCH(lstm_units = 20)
+    deep_llm_rarch.compile(optimizer = tf.keras.optimizers.Adam(1e-3))
     dummy = tf.zeros((1, 20, 1))
     dummy_text = tf.constant(["dummy news text"])
-    deep_llmrarch(dummy, dummy, dummy_text)
+    deep_llm_rarch((dummy, dummy, dummy_text))
 
-    print(deep_llmrarch.summary())
+    print(deep_llm_rarch.summary())
 
-    history = deep_llmrarch.fit(
-        x = (r_seq, rv_seq, text),
-        y = (r_target, rv_target),
-        epochs = 200,
-        batch_size = 128
+    history = deep_llm_rarch.fit(
+        x=[r_seq_train, rv_seq_train, text_train],
+        y=[r_target_train, rv_target_train],
+        epochs=5,
+        batch_size=128
     )
     fig,ax = plt.subplots()
     l1 = ax.plot(history.history['loss'],
@@ -273,13 +410,42 @@ if __name__ == '__main__':
 
     plt.show()
 
-    # Create a directory to store saved models
-    save_dir = "./Training/Saved_results"
-    os.makedirs(save_dir, exist_ok=True)
+    pred_log_sigma2, pred_rv_hat, pred_log_sigmau2 = deep_llm_rarch.predict((r_seq_train, rv_seq_train, text_train))
 
-    # --- Save weights ---
-    deep_arch.save_weights(os.path.join(save_dir, "deep_arch.weights.h5"))
-    deep_rarch.save_weights(os.path.join(save_dir, "deep_rarch.weights.h5"))
+    log_sigma2_DLRA_train = pred_log_sigma2.squeeze()
+    rv_hat_DLRA_train = pred_rv_hat.squeeze()
+    log_sigmau2_DLRA_train = pred_log_sigmau2[0]
+
+    pred_log_sigma2, pred_rv_hat, pred_log_sigmau2 = deep_llm_rarch.predict((r_seq_test, rv_seq_test, text_test))
+
+    log_sigma2_DLRA_test = pred_log_sigma2.squeeze()
+    rv_hat_DLRA_test = pred_rv_hat.squeeze()
+    log_sigmau2_DLRA_test = pred_log_sigmau2[0]
+
+    save_dir = Path("/content/drive/MyDrive/Projects/BERT_in_intraday_trading/Training/Saved_results")
+    save_dir.mkdir(parents=True, exist_ok=True)
+
+    deep_llm_rarch.save_weights(os.path.join(save_dir, "deep_llm_rarch.weights.h5"))
+
+    with open(save_dir / "log_sigma2_DLRA_train.pkl", "wb") as f:
+        pickle.dump(log_sigma2_DLRA_train, f)
+
+    with open(save_dir / "log_sigma2_DLRA_test.pkl", "wb") as f:
+        pickle.dump(log_sigma2_DLRA_test, f)
+
+    with open(save_dir / "rv_hat_DLRA_train.pkl", "wb") as f:
+        pickle.dump(rv_hat_DLRA_train, f)
+
+    with open(save_dir / "rv_hat_DLRA_test.pkl", "wb") as f:
+        pickle.dump(rv_hat_DLRA_test, f)
+
+    with open(save_dir / "log_sigmau2_DLRA_train.pkl", "wb") as f:
+        pickle.dump(log_sigmau2_DLRA_train, f)
+
+    with open(save_dir / "log_sigmau2_DLRA_test.pkl", "wb") as f:
+        pickle.dump(log_sigmau2_DLRA_test, f)
+
+
     deep_llmrarch.save_weights(os.path.join(save_dir, "deep_llmrarch.weights.h5"))
 
     print("All model weights saved.")
