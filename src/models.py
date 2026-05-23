@@ -1,12 +1,32 @@
+import pandas as pd
+import numpy as np
+
+pd.set_option('display.max_columns', 999)
+
+import ta
+import os
+import math
+
+import matplotlib.pyplot as plt
+
 from src.support import *
 from src.backtest import *
 
 import tensorflow as tf
+import tensorflow_hub as hub
 import keras
 import keras_hub
+from abc import ABC, abstractmethod
 import keras
+from keras import layers
+import pickle
+
+import lightgbm as lgb
+from sklearn.metrics import mean_pinball_loss
+
 import warnings
 warnings.filterwarnings('ignore')
+plt.style.use('classic')
 
 
 class DeepARCH(tf.keras.Model):
@@ -74,8 +94,9 @@ class DeepRARCH(tf.keras.Model):
     def metrics(self):
         return [self.loss_tracker]
 
-    def call(self, x, rv, training=False):
-
+    def call(self, inputs, training=False):
+        
+        x, rv = inputs
         inputs = tf.concat([x, rv], axis=2)
 
         h = self.lstm(inputs, training=training)
@@ -86,10 +107,11 @@ class DeepRARCH(tf.keras.Model):
 
     def train_step(self, data):
 
-        (x, rv), (r_t, rv_t) = data
+        inputs, targets = data
+        r_t, rv_t = targets
 
         with tf.GradientTape() as tape:
-            log_sigma2, rv_hat, log_sigma2_u = self(x, rv, training=True)
+            log_sigma2, rv_hat, log_sigma2_u = self(inputs, training=True)
             sigma2 = tf.exp(log_sigma2) + 1e-6
             sigma_u2 = tf.exp(log_sigma2_u)
 
@@ -108,8 +130,10 @@ class DeepRARCH(tf.keras.Model):
 
     def test_step(self, data):
 
-        (x, rv), (r_t, rv_t) = data
-        log_sigma2, rv_hat, log_sigma2_u = self(x, rv, training=False)
+        inputs, targets = data
+        r_t, rv_t = targets
+
+        log_sigma2, rv_hat, log_sigma2_u = self(inputs, training=False)
         sigma2 = tf.exp(log_sigma2) + 1e-6
         sigma_u2 = tf.exp(log_sigma2_u)
 
@@ -166,7 +190,8 @@ class DeepLLMRARCH(tf.keras.Model):
 
         return model
 
-    def call(self, x, rv, text, training=False):
+    def call(self, inputs, training=False):
+        x, rv, text = inputs
 
         text_vec = self.text_model(text, training=training)      # (batch, 768)
         text_vec = self.text_projection(text_vec)  # (batch, 32)
@@ -186,11 +211,12 @@ class DeepLLMRARCH(tf.keras.Model):
 
     def train_step(self, data):
 
-        (x, rv, text), (r_t, rv_t) = data
+        inputs, targets = data
+        r_t, rv_t = targets
 
         with tf.GradientTape() as tape:
 
-            log_sigma2, rv_hat, log_sigma2_u = self(x, rv, text, training=True)
+            log_sigma2, rv_hat, log_sigma2_u = self(inputs, training=True)
 
             sigma2 = tf.exp(log_sigma2) + 1e-6
             sigma_u2 = tf.exp(log_sigma2_u)
@@ -211,9 +237,10 @@ class DeepLLMRARCH(tf.keras.Model):
 
     def test_step(self, data):
 
-        (x, rv, text), (r_t, rv_t) = data
+        inputs, targets = data
+        r_t, rv_t = targets
 
-        log_sigma2, rv_hat, log_sigma2_u = self(x, rv, text, training=False)
+        log_sigma2, rv_hat, log_sigma2_u = self(inputs, training=False)
 
         sigma2 = tf.exp(log_sigma2) + 1e-6
         sigma_u2 = tf.exp(log_sigma2_u)
