@@ -21,6 +21,9 @@ from src.support import *
 from src.backtest import Evaluator
 from src.models import DeepARCH, DeepRARCH, DeepLLMRARCH
 
+import json
+import pickle
+from pathlib import Path
 
 if __name__ == '__main__':
 
@@ -123,6 +126,21 @@ if __name__ == '__main__':
         .sort_index()
     )
 
+    # Visualize data
+
+    fig, ax = plt.subplots(nrows = 2, ncols = 1, figsize = (20, 8))
+    ax[0].plot(df['TITLE'], alpha = 0.5)
+
+    ax_0 = ax[0].twinx()
+    ax_0.plot(df['CLOSE'],
+            color = 'red'
+            )
+
+    ax[1].boxplot(df['TITLE'])
+
+    plt.tight_layout()
+    plt.show()
+
     # Prepare data for training
 
     data = df[['LOG_RET(T)', 'RV(T)', 'CONTENT']].dropna()
@@ -130,32 +148,94 @@ if __name__ == '__main__':
     data = data.merge(intraday_returns, left_index= True, right_index = True, how = 'left').dropna().values
     
     N = len(data)
-    num_samples = N - 20
+    window = 20
+    num_samples = N - window
 
-    r_seq = np.zeros((num_samples, 20))
-    rv_seq = np.zeros((num_samples, 20))
+    r_seq = np.zeros((num_samples, window))
+    rv_seq = np.zeros((num_samples, window))
     r_target = np.zeros((num_samples, 1))  # r_t
     rv_target = np.zeros((num_samples, 1))  # rv_t
     text = np.empty((num_samples, 1), dtype=object)
 
     for i in range(num_samples):
-        r_seq[i, :] = data[i:i+20, 0]      # past 20 returns
-        rv_seq[i, :] = data[i:i+20, 1]      # past 20 rv
+        r_seq[i, :] = data[i:i+window, 0]      # past returns
+        rv_seq[i, :] = data[i:i+window, 1]      # past rv
+        text[i, 0] = data[i+window-1, 2]     # news
 
-        r_target[i, 0] = data[i+20, 0]     # next return
-        rv_target[i, 0] = data[i+20, 1]     # next rv
-        text[i, 0] = data[i+20, 2]     # next return
-
+        r_target[i, 0] = data[i+window, 0]     # next return
+        rv_target[i, 0] = data[i+window, 1]     # next rv
+        
     r_seq = tf.expand_dims(r_seq, axis=-1)
     rv_seq = tf.expand_dims(rv_seq, axis=-1)
     text = tf.squeeze(text)
     r_target = tf.convert_to_tensor(r_target)
     rv_target = tf.convert_to_tensor(rv_target)
 
-    intraday_returns = data[20:, 3:]
+    intraday_returns = data[window:, 3:]
+    train_size = int(num_samples * 0.6)
 
-    save_dir = "./Training/Saved_results"
-    os.makedirs(save_dir, exist_ok=True)
+    # sequences
+    r_seq_train = r_seq[:train_size]
+    r_seq_test = r_seq[train_size:]
+
+    rv_seq_train = rv_seq[:train_size]
+    rv_seq_test = rv_seq[train_size:]
+
+    # targets
+    r_target_train = r_target[:train_size]
+    r_target_test = r_target[train_size:]
+
+    rv_target_train = rv_target[:train_size]
+    rv_target_test = rv_target[train_size:]
+
+    # text
+    text_train = text[:train_size]
+    text_test = text[train_size:]
+
+    # intraday returns
+    intraday_train = intraday_returns[:train_size]
+    intraday_test = intraday_returns[train_size:]
+
+    # GARCH(1,1)
+    save_dir = Path("/content/drive/MyDrive/Projects/BERT_in_intraday_trading/Training/Saved_results")
+    jsonl_path = save_dir / "garch_params.jsonl"
+
+    with open(jsonl_path, "r") as f:
+        garch_params = json.loads(f.readline())
+
+    print("GARCH Parameters:")
+    print(garch_params)
+
+    train_pickle_path = save_dir / "log_sigma2_GARCH_train.pkl"
+    with open(train_pickle_path, "rb") as f:
+        log_sigma2_GARCH_train = pickle.load(f)
+
+    print("\nTrain log_sigma2 shape:")
+    print(log_sigma2_GARCH_train.shape)
+
+    test_pickle_path = save_dir / "log_sigma2_GARCH_test.pkl"
+    with open(test_pickle_path, "rb") as f:
+        log_sigma2_GARCH_test = pickle.load(f)
+
+    print("\nTest log_sigma2 shape:")
+    print(log_sigma2_GARCH_test.shape)
+
+    evaluator = Evaluator(compare_variance = False)
+    results_error, results_tail, NLL = evaluator.evaluate(log_sigma2 = log_sigma2_GARCH_train.reshape(-1, 1),
+                                                        returns_target = r_target_train,
+                                                        intraday_returns = intraday_train,
+                                                        alpha_levels = [0.01, 0.05])
+    print(results_error)
+    print(results_tail)
+    print(f'Negative loglikelihood: {NLL}')
+
+    results_error, results_tail, NLL = evaluator.evaluate(log_sigma2 = log_sigma2_GARCH_test,
+                                                        returns_target = r_target_test,
+                                                        intraday_returns = intraday_test,
+                                                        alpha_levels = [0.01, 0.05])
+    print(results_error)
+    print(results_tail)
+    print(f'Negative loglikelihood: {NLL}')
 
     # DeepARCH
     deep_arch = DeepARCH(lstm_units=20)
@@ -163,29 +243,140 @@ if __name__ == '__main__':
     deep_arch(tf.zeros((1, 20, 1)))
     deep_arch.load_weights(os.path.join(save_dir, "deep_arch.weights.h5"))
 
-    # DeepRARCH
-    deep_rarch = DeepRARCH(lstm_units=20)
-    deep_rarch.compile(optimizer=tf.keras.optimizers.Adam(1e-3))
-    deep_rarch(tf.zeros((1, 20, 1)), tf.zeros((1, 20, 1)))
-    deep_rarch.load_weights(os.path.join(save_dir, "deep_rarch.weights.h5"))
+    # Load arrays
+    with open(save_dir / "log_sigma2_DA_train.pkl", "rb") as f:
+        log_sigma2_DA_train = pickle.load(f)
 
-    # DeepLLMRARCH
-    deep_llmrarch = DeepLLMRARCH(lstm_units=20)
-    deep_llmrarch.compile(optimizer=tf.keras.optimizers.Adam(1e-3))
-    deep_llmrarch(tf.zeros((1, 20, 1)), tf.zeros((1, 20, 1)), tf.constant(["dummy news text"]))
-    deep_llmrarch.load_weights(os.path.join(save_dir, "deep_llmrarch.weights.h5"))
+    with open(save_dir / "log_sigma2_DA_test.pkl", "rb") as f:
+        log_sigma2_DA_test = pickle.load(f)
 
-    print("All model weights loaded.")
-
-    # Evaluation
-
-    evaluator = Evaluator(compare_variance = False)
-
-    log_sigma2 = deep_arch.predict(r_seq)
-    results_error, results_tail, NLL = evaluator.evaluate(log_sigma2 = log_sigma2,
-                                                      returns_target = r_target,
-                                                      intraday_returns = intraday_returns,
-                                                      alpha_levels = [0.01, 0.05])
+    results_error, results_tail, NLL = evaluator.evaluate(log_sigma2 = log_sigma2_DA_train,
+                                                        returns_target = r_target_train,
+                                                        intraday_returns = intraday_train,
+                                                        alpha_levels = [0.01, 0.05])
     print(results_error)
     print(results_tail)
     print(f'Negative loglikelihood: {NLL}')
+
+    results_error, results_tail, NLL = evaluator.evaluate(log_sigma2 = log_sigma2_DA_test,
+                                                        returns_target = r_target_test,
+                                                        intraday_returns = intraday_test,
+                                                        alpha_levels = [0.01, 0.05])
+    print(results_error)
+    print(results_tail)
+    print(f'Negative loglikelihood: {NLL}')
+
+    # Deep RARCH
+    deep_rarch = DeepRARCH(lstm_units=20)
+    deep_rarch.compile(optimizer=tf.keras.optimizers.Adam(1e-3))
+    deep_rarch((tf.zeros((1, 20, 1)), tf.zeros((1, 20, 1))))
+    deep_rarch.load_weights(os.path.join(save_dir, "deep_rarch.weights.h5"))
+
+    # Load arrays
+    with open(save_dir / "log_sigma2_DRA_train.pkl", "rb") as f:
+        log_sigma2_DRA_train = pickle.load(f)
+
+    with open(save_dir / "log_sigma2_DRA_test.pkl", "rb") as f:
+        log_sigma2_DRA_test = pickle.load(f)
+
+    with open(save_dir / "rv_hat_DRA_train.pkl", "rb") as f:
+        rv_hat_DRA_train = pickle.load(f)
+
+    with open(save_dir / "rv_hat_DRA_test.pkl", "rb") as f:
+        rv_hat_DRA_test = pickle.load(f)
+
+    with open(save_dir / "log_sigmau2_DRA_train.pkl", "rb") as f:
+        log_sigmau2_DRA_train = pickle.load(f)
+
+    with open(save_dir / "log_sigmau2_DRA_test.pkl", "rb") as f:
+        log_sigmau2_DRA_test = pickle.load(f)
+
+    results_error, results_tail, NLL = evaluator.evaluate(
+        log_sigma2 = log_sigma2_DRA_train,
+        returns_target = r_target,
+        intraday_returns = intraday_returns,
+        alpha_levels = [0.01, 0.05],
+        rv = rv_target,
+        rv_hat = rv_hat_DRA_train,
+        log_sigmau2 = log_sigmau2_DRA_train
+    )
+
+    print(results_error)
+    print(results_tail)
+    print(f'Negative loglikelihood: {NLL}')
+
+    results_error, results_tail, NLL = evaluator.evaluate(
+        log_sigma2 = log_sigma2_DRA_test,
+        returns_target = r_target,
+        intraday_returns = intraday_returns,
+        alpha_levels = [0.01, 0.05],
+        rv = rv_target,
+        rv_hat = rv_hat_DRA_test,
+        log_sigmau2 = log_sigmau2_DRA_test
+    )
+
+    print(results_error)
+    print(results_tail)
+    print(f'Negative loglikelihood: {NLL}')
+
+    # Deep LLM RARCH
+
+    deep_llm_rarch = DeepLLMRARCH(lstm_units=20)
+    deep_llm_rarch.compile(optimizer=tf.keras.optimizers.Adam(1e-3))
+    dummy_x = tf.zeros((1, 20, 1))
+    dummy_rv = tf.zeros((1, 20, 1))
+    dummy_text = tf.constant(["Example market news text stream."], dtype=tf.string)
+    deep_llm_rarch((dummy_x, dummy_rv, dummy_text))
+    deep_llm_rarch.load_weights(os.path.join(save_dir, "deep_llm_rarch.weights.h5"))
+
+    # Load arrays
+    with open(save_dir / "log_sigma2_DLRA_train.pkl", "rb") as f:
+        log_sigma2_DLRA_train = pickle.load(f)
+
+    with open(save_dir / "log_sigma2_DLRA_test.pkl", "rb") as f:
+        log_sigma2_DLRA_test = pickle.load(f)
+
+    with open(save_dir / "rv_hat_DLRA_train.pkl", "rb") as f:
+        rv_hat_DLRA_train = pickle.load(f)
+
+    with open(save_dir / "rv_hat_DLRA_test.pkl", "rb") as f:
+        rv_hat_DLRA_test = pickle.load(f)
+
+    with open(save_dir / "log_sigmau2_DLRA_train.pkl", "rb") as f:
+        log_sigmau2_DLRA_train = pickle.load(f)
+
+    with open(save_dir / "log_sigmau2_DLRA_test.pkl", "rb") as f:
+        log_sigmau2_DLRA_test = pickle.load(f)
+
+    results_error, results_tail, NLL = evaluator.evaluate(
+        log_sigma2 = log_sigma2_DLRA_train,
+        returns_target = r_target,
+        intraday_returns = intraday_returns,
+        alpha_levels = [0.01, 0.05],
+        rv = rv_target,
+        rv_hat = rv_hat_DLRA_train,
+        log_sigmau2 = log_sigmau2_DLRA_train
+    )
+
+    print(results_error)
+    print(results_tail)
+    print(f'Negative loglikelihood: {NLL}')
+
+    results_error, results_tail, NLL = evaluator.evaluate(
+        log_sigma2 = log_sigma2_DLRA_test,
+        returns_target = r_target,
+        intraday_returns = intraday_returns,
+        alpha_levels = [0.01, 0.05],
+        rv = rv_target,
+        rv_hat = rv_hat_DLRA_test,
+        log_sigmau2 = log_sigmau2_DLRA_test
+    )
+
+    print(results_error)
+    print(results_tail)
+    print(f'Negative loglikelihood: {NLL}')
+
+
+
+
+
