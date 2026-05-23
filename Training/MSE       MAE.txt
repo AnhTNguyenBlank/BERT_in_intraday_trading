@@ -1,0 +1,111 @@
+                     MSE       MAE
+Proxy                              
+RV               0.005131  0.049031
+BV               0.005430  0.052766
+MedRV            0.005634  0.053428
+RK_Parzen        0.006975  0.060754
+RK_TukeyHanning  0.007746  0.064627
+          QLOSS  JOINTLOSS
+alpha                     
+0.01   0.005731   0.457356
+0.05   0.017978  -0.027036
+Negative loglikelihood: -2.7271050283295564
+
+
+                   MSE       MAE
+Proxy                              
+RV               0.033782  0.115030
+BV               0.032053  0.114742
+MedRV            0.031898  0.116062
+RK_Parzen        0.033997  0.122331
+RK_TukeyHanning  0.035393  0.125518
+          QLOSS  JOINTLOSS
+alpha                     
+0.01   0.012563   2.436995
+0.05   0.029580   0.808385
+Negative loglikelihood: -1.3599444427639897
+
+=========================================================
+    MSE       MAE
+Proxy                              
+RV               0.005137  0.049028
+BV               0.005357  0.052668
+MedRV            0.005666  0.053670
+RK_Parzen        0.006576  0.059024
+RK_TukeyHanning  0.007231  0.062515
+          QLOSS  JOINTLOSS
+alpha                     
+0.01   0.005437   0.369597
+0.05   0.017593  -0.054034
+Negative loglikelihood: -2.800176663069177
+
+
+                 MSE       MAE
+Proxy                              
+RV               0.013584  0.057784
+BV               0.012127  0.059350
+MedRV            0.011884  0.061005
+RK_Parzen        0.013204  0.068886
+RK_TukeyHanning  0.014221  0.073036
+          QLOSS  JOINTLOSS
+alpha                     
+0.01   0.008172   0.841493
+0.05   0.023390   0.224007
+Negative loglikelihood: -2.3345183600265598
+
+
+=========================================================
+                    MSE       MAE
+Proxy                              
+RV               0.018702  0.087810
+BV               0.017328  0.086395
+MedRV            0.017608  0.087815
+RK_Parzen        0.019446  0.093222
+RK_TukeyHanning  0.020373  0.095720
+          QLOSS  JOINTLOSS
+alpha                     
+0.01   0.011160   2.777778
+0.05   0.025142   0.783021
+Negative loglikelihood: -1.245984880561997
+
+
+            MSE       MAE
+Proxy                              
+RV               0.020050  0.095606
+BV               0.019172  0.095811
+MedRV            0.019354  0.096898
+RK_Parzen        0.021265  0.102712
+RK_TukeyHanning  0.022325  0.105623
+          QLOSS  JOINTLOSS
+alpha                     
+0.01   0.010308   2.271784
+0.05   0.025003   0.667696
+Negative loglikelihood: -1.4676793415543643
+
+=========================================================
+
+          MSE       MAE
+Proxy                              
+RV               0.017385  0.089300
+BV               0.016680  0.090642
+MedRV            0.016828  0.091622
+RK_Parzen        0.018765  0.098347
+RK_TukeyHanning  0.019871  0.101789
+          QLOSS  JOINTLOSS
+alpha                     
+0.01   0.008798   1.240783
+0.05   0.023507   0.366859
+Negative loglikelihood: -2.074307040428554
+
+              MSE       MAE
+Proxy                              
+RV               0.018850  0.096191
+BV               0.018439  0.098356
+MedRV            0.018529  0.099132
+RK_Parzen        0.020508  0.105883
+RK_TukeyHanning  0.021693  0.109464
+          QLOSS  JOINTLOSS
+alpha                     
+0.01   0.008598   1.135785
+0.05   0.023789   0.359499
+Negative loglikelihood: -2.0905423440963333
