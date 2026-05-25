@@ -58,12 +58,14 @@ if __name__ == '__main__':
     df_15_min = prepare_df(df = ohlc_15m, timeframe = '15min', add_indicators = True)
     df_15_min = df_15_min[(df_15_min.index >= news_data.index[0]) & ((df_15_min.index <= news_data.index[-1]))]
 
-    df_1_min['KEY_MAP_15M'] = df_1_min.index.ceil('15min')
-    df_1_min['LOG_RET(T)'] = np.log(df_1_min['CLOSE']/df_1_min['CLOSE'].shift(1))
-    news_data['KEY_MAP_15M'] = news_data.index.ceil('15min')
+    df_1_min['KEY_MAP_15M'] = df_1_min.index.floor('15min')
+    df_1_min['LOG_RET(T)'] = np.log(df_1_min['CLOSE']/df_1_min['CLOSE'].shift(1))*100
+    news_data['KEY_MAP_15M'] = news_data.index.floor('15min')
+    # news_data['KEY_MAP_15M'] = np.where(news_data['KEY_MAP_15M'].dt.day_of_week == 6, news_data['KEY_MAP_15M'] - pd.Timedelta(days = 2), news_data['KEY_MAP_15M'])
 
-    # Prepare data
-
+    df_15_min['LOG_RET(T)'] = np.log(df_15_min['CLOSE']/df_15_min['CLOSE'].shift(1))*100
+    
+    #===================================== Prepare data
     df_rv = df_1_min.groupby(
         by = 'KEY_MAP_15M'
     ).agg(
@@ -87,6 +89,15 @@ if __name__ == '__main__':
 
     df = df.merge(
         news_data.groupby(by = 'KEY_MAP_15M').agg(
+            {'TITLE': 'sum'}
+        ),
+        how = 'left',
+        left_index = True,
+        right_index = True
+    ).fillna('None')
+
+    df = df.merge(
+        news_data.groupby(by = 'KEY_MAP_15M').agg(
             {'CONTENT': 'sum'}
         ),
         how = 'left',
@@ -101,13 +112,15 @@ if __name__ == '__main__':
         right_index = True
     )
 
+    df_rv = df_rv.rename(columns={'LOG_RET(T)': 'RV(T)'})
     df = df.merge(
         df_rv,
         how = 'left',
         left_index = True,
         right_index = True
     )
-    df.columns = ['TITLE', 'CONTENT', 'OPEN', 'HIGH', 'LOW', 'CLOSE', 'TICK_VOL',
+
+    df.columns = ['NUM_NEWS', 'TITLE', 'CONTENT', 'OPEN', 'HIGH', 'LOW', 'CLOSE', 'TICK_VOL',
        'AVG_PRICE', 'FLAG_INCREASE_CANDLE', 'BODY', 'UPPER_SHADOW',
        'LOWER_SHADOW', 'WHOLE_RANGE', 'FLAG_LONG_UPPER_SHADOW',
        'FLAG_LONG_LOWER_SHADOW', 'FLAG_HIGHER_HIGH(20)', 'FLAG_HIGHER_LOW(20)',
@@ -116,8 +129,7 @@ if __name__ == '__main__':
        'FLAG_UNDER_30_RSI', 'FLAG_OVER_70_RSI', 'FLAG_UPTREND_RSI(20)',
        'BB_UPPER_BAND(50)', 'POSITION_UPPER_BAND(50)', 'BB_LOWER_BAND(50)',
        'POSITION_LOWER_BAND(50)', 'EMA(50)', 'POSITION_EMA(50)', 'EMA(200)',
-       'POSITION_EMA(200)', 'RV(T)'
-    ]
+       'POSITION_EMA(200)', 'LOG_RET(T)', 'RV(T)']
 
     intraday_returns = (
         df_1_min
@@ -128,22 +140,27 @@ if __name__ == '__main__':
 
     # Visualize data
 
-    fig, ax = plt.subplots(nrows = 2, ncols = 1, figsize = (20, 8))
-    ax[0].plot(df['TITLE'], alpha = 0.5)
+    fig, ax = plt.subplots(nrows = 4, ncols = 1, figsize = (20, 8))
+
+    ax[0].plot(df['NUM_NEWS'], alpha = 0.5)
 
     ax_0 = ax[0].twinx()
-    ax_0.plot(df['CLOSE'],
+    ax_0.plot(df['LOG_RET(T)'],
             color = 'red'
             )
+    # ax_0.plot(df['RV(T)'],
+    #           color = 'green')
 
-    ax[1].boxplot(df['TITLE'])
+    ax[1].boxplot(df['NUM_NEWS'])
+    ax[2].hist(df['LOG_RET(T)'], bins = 100)
+    ax[3].hist(df['RV(T)'], bins = 100)
 
     plt.tight_layout()
     plt.show()
 
-    # Prepare data for training
+    #===================================== Prepare data for training
 
-    data = df[['LOG_RET(T)', 'RV(T)', 'CONTENT']].dropna()
+    data = df[['LOG_RET(T)', 'RV(T)', 'TITLE']].dropna()
     intraday_returns = intraday_returns[(intraday_returns.index >= data.index[0]) & (intraday_returns.index <= data.index[-1])]
     data = data.merge(intraday_returns, left_index= True, right_index = True, how = 'left').dropna().values
     
@@ -151,27 +168,25 @@ if __name__ == '__main__':
     window = 20
     num_samples = N - window
 
-    r_seq = np.zeros((num_samples, window))
-    rv_seq = np.zeros((num_samples, window))
-    r_target = np.zeros((num_samples, 1))  # r_t
-    rv_target = np.zeros((num_samples, 1))  # rv_t
-    text = np.empty((num_samples, 1), dtype=object)
+    content_series = data['TITLE'].values
+    numeric_data   = data.drop(columns=['TITLE']).values.astype(np.float64)
+
+    r_seq    = np.zeros((num_samples, window))
+    rv_seq   = np.zeros((num_samples, window))
+    r_target = np.zeros((num_samples, 1))
+    rv_target= np.zeros((num_samples, 1))
+    text     = np.empty((num_samples, 1), dtype=object)
 
     for i in range(num_samples):
-        r_seq[i, :] = data[i:i+window, 0]      # past returns
-        rv_seq[i, :] = data[i:i+window, 1]      # past rv
-        text[i, 0] = data[i+window-1, 2]     # news
+        r_seq[i, :]   = numeric_data[i:i+window, 0]
+        rv_seq[i, :]  = numeric_data[i:i+window, 1]
+        text[i, 0]    = content_series[i+window-1]
 
-        r_target[i, 0] = data[i+window, 0]     # next return
-        rv_target[i, 0] = data[i+window, 1]     # next rv
-        
-    r_seq = tf.expand_dims(r_seq, axis=-1)
-    rv_seq = tf.expand_dims(rv_seq, axis=-1)
-    text = tf.squeeze(text)
-    r_target = tf.convert_to_tensor(r_target)
-    rv_target = tf.convert_to_tensor(rv_target)
+        r_target[i, 0]  = numeric_data[i+window, 0]
+        rv_target[i, 0] = numeric_data[i+window, 1]
 
-    intraday_returns = data[window:, 3:]
+    intraday_returns = numeric_data[window:, 2:]
+
     train_size = int(num_samples * 0.6)
 
     # sequences
@@ -196,6 +211,20 @@ if __name__ == '__main__':
     intraday_train = intraday_returns[:train_size]
     intraday_test = intraday_returns[train_size:]
 
+    r_seq_train  = tf.expand_dims(r_seq_train,  axis=-1)
+    r_seq_test   = tf.expand_dims(r_seq_test,   axis=-1)
+    rv_seq_train = tf.expand_dims(rv_seq_train, axis=-1)
+    rv_seq_test  = tf.expand_dims(rv_seq_test,  axis=-1)
+
+    r_target_train  = tf.convert_to_tensor(r_target_train,  dtype=tf.float32)
+    r_target_test   = tf.convert_to_tensor(r_target_test,   dtype=tf.float32)
+    rv_target_train = tf.convert_to_tensor(rv_target_train, dtype=tf.float32)
+    rv_target_test  = tf.convert_to_tensor(rv_target_test,  dtype=tf.float32)
+
+    text_train = tf.constant(text_train, dtype=tf.string)
+    text_test  = tf.constant(text_test, dtype=tf.string)
+
+    
     # GARCH(1,1)
     save_dir = Path("/content/drive/MyDrive/Projects/BERT_in_intraday_trading/Training/Saved_results")
     jsonl_path = save_dir / "garch_params.jsonl"
